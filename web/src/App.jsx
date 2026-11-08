@@ -76,26 +76,32 @@ function Arc() {
   );
 }
 
-/* Score dial: the same tick language as the arc, filled up to the model score. */
-function Dial({ p, band, tone }) {
-  const N = 60, cx = 150, cy = 150;
+/* Score bar: a plain linear scale with the uncertain band shaded and a marker at the model score. */
+function ScoreBar({ p, band, tone }) {
   const pct = Math.round(p * 100);
-  const ticks = Array.from({ length: N }, (_, i) => {
-    const t = i / (N - 1);
-    const a = Math.PI * (1 - t);
-    const mark = Math.abs(t - band.low) < 0.5 / (N - 1) || Math.abs(t - band.high) < 0.5 / (N - 1);
-    const r1 = 98, r2 = mark ? 142 : 128;
-    return (
-      <line key={i} className={`dtick${t <= p ? " on" : ""}${mark ? " mark" : ""}`} style={{ "--i": i }}
-        x1={cx + r1 * Math.cos(a)} y1={cy - r1 * Math.sin(a)} x2={cx + r2 * Math.cos(a)} y2={cy - r2 * Math.sin(a)} />
-    );
-  });
+  const lo = Math.round(band.low * 100), hi = Math.round(band.high * 100);
   return (
-    <div className={`dial tone-${tone}`} role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct} aria-label="Model score for OSCC">
-      <svg viewBox="0 0 300 160" aria-hidden="true" focusable="false">{ticks}</svg>
-      <div className="dial-read">
-        <span className={`dial-num tone-${tone}`}>{pct}<small>%</small></span>
-        <span className="dial-cap">model score</span>
+    <div className={`scorebar tone-${tone}`} role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct} aria-label="Model score for OSCC">
+      <div className="score-read">
+        <span className="score-num">{pct}<small>%</small></span>
+        <span className="score-cap">model score for OSCC</span>
+      </div>
+      <div className="track" aria-hidden="true">
+        <span className="zone z-low" style={{ width: `${lo}%` }} />
+        <span className="zone z-mid" style={{ width: `${hi - lo}%` }} />
+        <span className="zone z-high" style={{ width: `${100 - hi}%` }} />
+        <span className="marker" style={{ left: `${pct}%` }} />
+      </div>
+      <div className="scale" aria-hidden="true">
+        <span style={{ left: 0 }}>0</span>
+        <span style={{ left: `${lo}%` }}>{lo}</span>
+        <span style={{ left: `${hi}%` }}>{hi}</span>
+        <span style={{ left: "100%" }}>100</span>
+      </div>
+      <div className="legend" aria-hidden="true">
+        <span><i className="z-low" />Normal-like</span>
+        <span><i className="z-mid" />Uncertain</span>
+        <span><i className="z-high" />OSCC-like</span>
       </div>
     </div>
   );
@@ -107,11 +113,6 @@ function AppBar({ user, onSignOut, theme, onTheme }) {
   return (
     <header className="appbar no-print">
       <div className="brand">
-        <svg className="logo" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
-          <rect width="32" height="32" rx="9" />
-          <path d="M7 16a9 9 0 0 1 18 0" fill="none" strokeWidth="2" strokeLinecap="round" />
-          <path d="M6 22l2.2-4.6M9.5 24.6 13 19.2M14.6 26l3.8-5.4M20.2 26l3.4-4.8M25 24l2.2-3.4" fill="none" strokeWidth="1.6" strokeLinecap="round" />
-        </svg>
         <span className="brand-name">OSCC Assistant</span>
       </div>
       <div className="appbar-actions">
@@ -299,19 +300,21 @@ function Dropzone({ onFile, disabled }) {
   );
 }
 
-function ResultPanel({ r, onReset }) {
+function ResultPanel({ r, email, onReset }) {
   const L = LABELS[r.label];
-  const when = new Date(r.createdAt).toLocaleString();
+  const d = new Date(r.createdAt);
+  const when = d.toLocaleString();
+  const pct = Math.round(r.pOscc * 100);
+  const lo = Math.round(r.band.low * 100), hi = Math.round(r.band.high * 100);
+  const img = r.imageInfo;
   return (
     <section className="panel result" aria-live="polite" aria-label="Result">
       <div className={`verdict tone-box-${L.tone}`}>
         <h2>{L.title}</h2>
         <p>{L.hint}</p>
       </div>
-      <Dial p={r.pOscc} band={r.band} tone={L.tone} />
-      <p className="soft small center">
-        Scores between {Math.round(r.band.low * 100)}% and {Math.round(r.band.high * 100)}% are treated as uncertain.
-      </p>
+      <ScoreBar p={r.pOscc} band={r.band} tone={L.tone} />
+      <p className="soft small center">Scores between {lo}% and {hi}% are treated as uncertain.</p>
       {r.qc.map((q) => (
         <p key={q.code} className="note warn"><Icon d={ICONS.warn} size={18} />{q.message}</p>
       ))}
@@ -327,25 +330,108 @@ function ResultPanel({ r, onReset }) {
         <button className="btn solid" onClick={onReset}>Analyse another image</button>
       </div>
 
-      <div className="print-only report">
-        <h1>OSCC Assistant: research output</h1>
-        <p><strong>Not a diagnosis. Not a medical device. Not validated for clinical use.</strong></p>
-        {r.previewUrl && <img src={r.previewUrl} alt="Analysed field" />}
-        <h2>{L.title} ({Math.round(r.pOscc * 100)}%)</h2>
-        <p>{L.hint}</p>
-        <table><tbody>
-          <tr><td>Result ID</td><td>{r.resultId}</td></tr>
-          <tr><td>Magnification</td><td>{r.magnification}</td></tr>
-          <tr><td>Model</td><td>{r.model?.version}</td></tr>
-          <tr><td>Analysed</td><td>{when}</td></tr>
-        </tbody></table>
-        <p className="sign">Reviewed by: ______________________ &nbsp;&nbsp; Date: ____________</p>
-      </div>
+      {/* ---- printable report (hidden on screen) ---- */}
+      <article className="print-only report">
+        <header className="rp-head">
+          <div>
+            <p className="rp-kicker">Research output</p>
+            <h1>OSCC Assistant: Image Analysis Report</h1>
+          </div>
+          <dl className="rp-meta">
+            <div><dt>Report no.</dt><dd>{r.resultId}</dd></div>
+            <div><dt>Date</dt><dd>{when}</dd></div>
+            {email && <div><dt>Run by</dt><dd>{email}</dd></div>}
+          </dl>
+        </header>
+
+        <p className="rp-banner">Research prototype. Not a diagnosis, not a medical device, and not validated for clinical use.</p>
+
+        <section className="rp-sec">
+          <h2>1. Case details</h2>
+          <table className="rp-form"><tbody>
+            <tr><th>Case / patient ID</th><td /><th>Specimen site</th><td /></tr>
+            <tr><th>Requesting clinician</th><td /><th>Slide / block no.</th><td /></tr>
+          </tbody></table>
+          <p className="rp-note">Fill in by hand if needed. The app does not store any patient information.</p>
+        </section>
+
+        <section className="rp-sec">
+          <h2>2. Summary of result</h2>
+          <div className={`rp-verdict tone-box-${L.tone}`}>
+            <strong>{L.title}</strong>
+            <span>{L.hint}</span>
+          </div>
+          <ScoreBar p={r.pOscc} band={r.band} tone={L.tone} />
+          <p className="rp-note">
+            The score is the model's calibrated probability that this field resembles OSCC rather than normal epithelium.
+            Scores from {lo}% to {hi}% are reported as uncertain.
+          </p>
+        </section>
+
+        <section className="rp-sec rp-keep">
+          <h2>3. Analysed image</h2>
+          <div className="rp-image">
+            {r.previewUrl && <img src={r.previewUrl} alt="Analysed field" />}
+            <table className="rp-table"><tbody>
+              <tr><th>Magnification</th><td>{r.magnification}</td></tr>
+              {img && <tr><th>Dimensions</th><td>{img.w} × {img.h} px</td></tr>}
+              {img && <tr><th>File size</th><td>{fmtBytes(img.size)}</td></tr>}
+              <tr><th>Tissue in field</th><td>{Math.round(r.tissueFraction * 100)}%</td></tr>
+            </tbody></table>
+          </div>
+        </section>
+
+        <section className="rp-sec rp-keep">
+          <h2>4. Image quality checks</h2>
+          {r.qc.length ? (
+            <ul className="rp-list">{r.qc.map((q) => <li key={q.code}>{q.message}</li>)}</ul>
+          ) : (
+            <p>No quality warnings were raised for this image.</p>
+          )}
+        </section>
+
+        <section className="rp-sec rp-keep">
+          <h2>5. Method</h2>
+          <table className="rp-table"><tbody>
+            <tr><th>Task</th><td>Binary classification: normal epithelium vs oral squamous cell carcinoma (OSCC)</td></tr>
+            <tr><th>Model</th><td>{r.model?.version ?? "n/a"} ({r.magnification} model)</td></tr>
+            <tr><th>Preprocessing</th><td>Area-interpolated resize and Macenko stain normalisation, identical to training</td></tr>
+            <tr><th>Output</th><td>Calibrated probability of OSCC, shown as a percentage</td></tr>
+            <tr><th>Training data</th><td>One public oral histology dataset; patient-level cross-validation; no external validation</td></tr>
+          </tbody></table>
+        </section>
+
+        <section className="rp-sec rp-keep">
+          <h2>6. Limitations</h2>
+          <ul className="rp-list">
+            <li>The model has not been tested on images from other laboratories, stains or scanners.</li>
+            <li>It looks at a single microscope field. It does not assess the whole slide and does not grade tumours.</li>
+            <li>A low score does not rule out disease, and a high score does not confirm it.</li>
+            <li>Results must be reviewed by a qualified pathologist and must not be used on their own for any clinical decision.</li>
+          </ul>
+        </section>
+
+        <section className="rp-sec rp-keep rp-sign">
+          <h2>7. Review</h2>
+          <div className="rp-sign-grid">
+            <div><span>Reviewer name</span></div>
+            <div><span>Signature</span></div>
+            <div><span>Date</span></div>
+          </div>
+          <p className="rp-note">Comments:</p>
+          <div className="rp-lines"><i /><i /></div>
+        </section>
+
+        <footer className="rp-foot">
+          <span>OSCC Assistant · Report {r.resultId}</span>
+          <span>Research prototype. Not a medical device.</span>
+        </footer>
+      </article>
     </section>
   );
 }
 
-function Workspace({ csrf, onExpired }) {
+function Workspace({ csrf, email, onExpired }) {
   const [mag, setMag] = useState("100x");
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
@@ -379,7 +465,7 @@ function Workspace({ csrf, onExpired }) {
     setError("");
     try {
       const r = await api.predict(csrf, mag, file);
-      setResult({ ...r, previewUrl: preview?.url });
+      setResult({ ...r, previewUrl: preview?.url, imageInfo: preview ? { w: preview.w, h: preview.h, size: preview.size } : null });
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) return onExpired();
       if (err instanceof ApiError && err.status === 429) setWait(err.retryAfter || 30);
@@ -432,21 +518,16 @@ function Workspace({ csrf, onExpired }) {
         </section>
 
         {result ? (
-          <ResultPanel r={result} onReset={clear} />
+          <ResultPanel r={result} email={email} onReset={clear} />
         ) : (
           <section className="panel empty no-print" aria-label="Result">
-            <div className="empty-dial" aria-hidden="true">
-              <svg viewBox="0 0 300 160" focusable="false">
-                {Array.from({ length: 60 }, (_, i) => {
-                  const a = Math.PI * (1 - i / 59);
-                  const m = i === 12 || i === 47;
-                  const r2 = m ? 142 : 128;
-                  return <line key={i} className={`dtick${m ? " mark" : ""}`} x1={150 + 98 * Math.cos(a)} y1={150 - 98 * Math.sin(a)} x2={150 + r2 * Math.cos(a)} y2={150 - r2 * Math.sin(a)} />;
-                })}
-              </svg>
-            </div>
             <h2>Your result appears here</h2>
-            <p className="soft">You will see a score from 0 to 100%, quality warnings for the image, and a report you can print.</p>
+            <p className="soft">After you run the model you will get:</p>
+            <ul className="empty-list">
+              <li><span>1</span>A model score from 0 to 100%</li>
+              <li><span>2</span>Quality warnings for the image</li>
+              <li><span>3</span>A report you can print or save as PDF</li>
+            </ul>
           </section>
         )}
       </main>
@@ -479,7 +560,7 @@ export default function App() {
         {boot ? (
           <div className="stage boot"><div className="progress" role="progressbar" aria-label="Loading"><div /></div></div>
         ) : user ? (
-          <Workspace csrf={user.csrfToken} onExpired={() => { setUser(null); setNotice("Your session expired. Please sign in again."); }} />
+          <Workspace csrf={user.csrfToken} email={user.email} onExpired={() => { setUser(null); setNotice("Your session expired. Please sign in again."); }} />
         ) : (
           <Landing onDone={(u) => { setNotice(""); setUser(u); }} notice={notice} />
         )}

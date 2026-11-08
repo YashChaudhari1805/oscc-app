@@ -480,6 +480,10 @@ func (s *Server) static() http.Handler {
 			return
 		}
 		clean := path.Clean("/" + r.URL.Path)
+		if clean == "/favicon.ico" { // the app ships no favicon; answer empty instead of the SPA page
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if !strings.Contains(clean, "/.") { // never serve dotfiles
 			p := filepath.Join(root, filepath.FromSlash(clean))
 			if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() && strings.HasPrefix(p, root) {
