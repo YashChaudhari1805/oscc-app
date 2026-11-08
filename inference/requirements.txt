@@ -1,0 +1,9 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+numpy
+opencv-python-headless
+pillow
+scikit-image>=0.22,<2
+onnxruntime>=1.17
+# Only needed when serving the .keras file instead of ONNX (BACKEND=keras):
+# tensorflow-cpu>=2.16

@@ -1,0 +1,49 @@
+# Production-style stack. NOT TESTED in the environment where this was authored (no Docker available):
+# review, then run:  docker compose --env-file ../.env -f docker-compose.yml up -d --build
+name: oscc
+services:
+  inference:                      # internal only: no published ports, no internet egress
+    build: { context: .., dockerfile: deploy/Dockerfile.inference }
+    environment:
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set INTERNAL_TOKEN}
+    volumes: ["../models:/models:ro"]
+    networks: [internal]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+  gateway:
+    build: { context: .., dockerfile: deploy/Dockerfile.gateway }
+    environment:
+      APP_ENV: production
+      INFERENCE_URL: http://inference:9000
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?}
+      SESSION_SECRET: ${SESSION_SECRET:?}
+      ALLOWED_DOMAINS: ${ALLOWED_DOMAINS:-}
+      ALLOWED_EMAILS: ${ALLOWED_EMAILS:-}
+      SMTP_HOST: ${SMTP_HOST:?}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:?}
+      TRUSTED_PROXY: "true"       # Caddy appends the real client IP to X-Forwarded-For
+    volumes: ["audit:/data"]
+    networks: [internal, edge]
+    depends_on: [inference]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+  caddy:                          # TLS termination (automatic HTTPS)
+    image: caddy:2
+    environment: { PUBLIC_HOST: "${PUBLIC_HOST:?}" }
+    ports: ["80:80", "443:443"]
+    volumes: ["./Caddyfile:/etc/caddy/Caddyfile:ro", "caddy_data:/data"]
+    networks: [edge]
+    depends_on: [gateway]
+    restart: unless-stopped
+networks:
+  internal: { internal: true }    # inference cannot reach the internet; only the gateway can reach it
+  edge: {}
+volumes: { audit: {}, caddy_data: {} }

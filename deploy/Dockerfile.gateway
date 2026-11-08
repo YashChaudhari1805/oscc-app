@@ -1,0 +1,20 @@
+FROM node:20-alpine AS web
+WORKDIR /w
+COPY web/package.json web/package-lock.json* ./
+RUN npm install --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
+
+FROM golang:1.22-alpine AS go
+WORKDIR /g
+COPY gateway/ ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /gateway .
+
+FROM alpine:3.20
+RUN adduser -D -u 10001 app && mkdir /data && chown app /data
+COPY --from=go /gateway /app/gateway
+COPY --from=web /w/dist /app/web
+USER app
+ENV WEB_DIR=/app/web AUDIT_LOG=/data/audit.jsonl GATEWAY_ADDR=0.0.0.0:8080
+EXPOSE 8080
+CMD ["/app/gateway"]

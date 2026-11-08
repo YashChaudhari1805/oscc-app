@@ -1,0 +1,25 @@
+{
+ "magnification": "400x",
+ "img_hw": [
+  288,
+  384
+ ],
+ "input": "uint8 RGB, preprocess_image() = INTER_AREA resize + Macenko (fixed ref)",
+ "T_bin": 1.0,
+ "T_grade": 1.0,
+ "T_bin_fitted": 0.5000043007109691,
+ "T_grade_fitted": 1.0,
+ "grade_enabled": false,
+ "grade_labels": [
+  "low",
+  "intermediate",
+  "high"
+ ],
+ "outputs": [
+  "p_oscc",
+  "p_grade"
+ ],
+ "weights": "imagenet",
+ "n_train_patients": 49,
+ "n_val_patients": 13
+}
