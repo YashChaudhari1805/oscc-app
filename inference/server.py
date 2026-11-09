@@ -7,13 +7,15 @@ import os
 import secrets
 import threading
 import time
+import zlib
 from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
-from preprocess import InvalidImage, decode_image, preprocess_image
+from explain import explain_occlusion
+from preprocess import InvalidImage, decode_image, preprocess_image, tissue_mask
 
 log = logging.getLogger("inference")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -26,6 +28,12 @@ MAX_CONCURRENCY = int(os.environ.get("MAX_CONCURRENCY", 2))
 BACKEND = os.environ.get("BACKEND", "auto")  # auto | onnx | keras
 LOW_TISSUE = float(os.environ.get("LOW_TISSUE_FRACTION", 0.15))
 LOW_RES_SHORT_SIDE = int(os.environ.get("LOW_RES_SHORT_SIDE", 480))
+EXPLAIN_ROWS = int(os.environ.get("EXPLAIN_ROWS", 9))
+EXPLAIN_COLS = int(os.environ.get("EXPLAIN_COLS", 12))
+EXPLAIN_WINDOW = int(os.environ.get("EXPLAIN_WINDOW", 3))
+EXPLAIN_STRIDE = int(os.environ.get("EXPLAIN_STRIDE", 2))
+EXPLAIN_RANDOM = int(os.environ.get("EXPLAIN_RANDOM", 4))
+EXPLAIN_SLOTS = threading.Semaphore(int(os.environ.get("EXPLAIN_MAX_CONCURRENCY", 1)))  # explanations are ~75 forward passes each
 MAGS = ("100x", "400x")
 
 if len(INTERNAL_TOKEN) < 16:
@@ -57,13 +65,16 @@ class Model:
         # warm-up so the first user request is not slow
         self.predict(np.zeros((1, *self.img_hw, 3), np.uint8))
 
-    def predict(self, batch_uint8: np.ndarray) -> float:
+    def predict_batch(self, batch_uint8: np.ndarray) -> np.ndarray:
         with self.lock:
             if self.backend == "onnx":
                 out = self.sess.run(None, {self.input_name: batch_uint8})[0]
             else:
                 out = self.km.predict(batch_uint8, verbose=0)[0]
-        return float(np.asarray(out).reshape(-1)[0])
+        return np.asarray(out, dtype=np.float64).reshape(len(batch_uint8), -1)[:, 0]
+
+    def predict(self, batch_uint8: np.ndarray) -> float:
+        return float(self.predict_batch(batch_uint8)[0])
 
 
 MODELS: dict[str, Model] = {}
@@ -126,3 +137,35 @@ def _run(model: Model, data: bytes):
         "model": {"version": model.version, "backend": model.backend, "img_hw": list(model.img_hw)},
         "latency_ms": int((time.perf_counter() - t0) * 1000),
     }
+
+
+@app.post("/v1/explain")
+async def explain(request: Request, mag: str = Query(...)):
+    _auth(request)
+    if mag not in MODELS:
+        raise HTTPException(status_code=400, detail="magnification_unavailable")
+    data = await request.body()
+    if not data or len(data) > MAX_BYTES:
+        raise HTTPException(status_code=413 if data else 400, detail="too_large" if data else "empty")
+    if not EXPLAIN_SLOTS.acquire(blocking=False):  # never queue heavy work behind heavy work
+        raise HTTPException(status_code=503, detail="busy")
+    try:
+        return _explain(MODELS[mag], data)
+    finally:
+        EXPLAIN_SLOTS.release()
+
+
+def _explain(model: Model, data: bytes):
+    t0 = time.perf_counter()
+    try:
+        arr, (ow, oh) = decode_image(data, model.img_hw, MAX_PIXELS)
+    except InvalidImage as e:
+        return JSONResponse(status_code=422, content={"error": str(e)})
+    img, tissue = preprocess_image(arr, model.img_hw)
+    glass = img[~tissue_mask(img)]  # hide patches with this image's own blank-glass colour
+    fill = np.median(glass, axis=0) if len(glass) > 200 else (240, 240, 240)
+    res = explain_occlusion(model.predict_batch, img, rows=EXPLAIN_ROWS, cols=EXPLAIN_COLS, win=EXPLAIN_WINDOW, stride=EXPLAIN_STRIDE,
+                            fill=fill, n_random=EXPLAIN_RANDOM, seed=zlib.crc32(data) & 0x7FFFFFFF)
+    res.update({"mag": model.mag, "tissue_fraction": round(tissue, 4), "model": {"version": model.version, "backend": model.backend},
+                "latency_ms": int((time.perf_counter() - t0) * 1000)})
+    return res

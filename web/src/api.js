@@ -41,6 +41,12 @@ export const api = {
   requestCode: (email) => request("/api/auth/request", { method: "POST", json: { email } }),
   verify: (email, code) => request("/api/auth/verify", { method: "POST", json: { email, code } }),
   logout: (csrf) => request("/api/auth/logout", { method: "POST", json: {}, csrf }),
+  explain: (csrf, magnification, file) => {
+    const form = new FormData();
+    form.append("magnification", magnification);
+    form.append("image", file);
+    return request("/api/explain", { method: "POST", form, csrf });
+  },
   predict: (csrf, magnification, file) => {
     const form = new FormData();
     form.append("magnification", magnification);

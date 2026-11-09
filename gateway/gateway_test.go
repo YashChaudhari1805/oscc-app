@@ -110,9 +110,10 @@ func newEnv(t *testing.T, tweak func(*Config)) *env {
 		Env: "development", InferenceURL: e.infer.URL, InternalToken: strings.Repeat("i", 32),
 		SessionSecret: []byte(strings.Repeat("s", 32)), AllowedEmails: map[string]bool{"doc@hospital.org": true},
 		AllowedDomains: map[string]bool{"clinic.org": true}, CookieName: "oscc_session", WebDir: dir,
-		MaxUploadBytes: 2 << 20, MaxConcurrentInfer: 2, LowBand: 0.2, HighBand: 0.8,
+		MaxUploadBytes: 2 << 20, MaxConcurrentInfer: 2, MaxConcurrentExplain: 1, LowBand: 0.2, HighBand: 0.8,
 		Limits: Limits{GlobalPerMinIP: 1000, OTPReqPerIPHour: 10, OTPReqPerEmail15m: 3, VerifyPerIP15m: 50, VerifyPerEmail15m: 50,
-			PredictPerMin: 5, PredictPerHour: 40, PredictPerDay: 150, PredictPerMinIP: 15},
+			PredictPerMin: 5, PredictPerHour: 40, PredictPerDay: 150, PredictPerMinIP: 15,
+			ExplainPerMin: 3, ExplainPerHour: 20, ExplainPerDay: 60, ExplainPerMinIP: 6},
 	}
 	if tweak != nil {
 		tweak(cfg)
@@ -638,5 +639,12 @@ func TestProductionConfigFailsClosed(t *testing.T) {
 		if err := set(over); err == nil {
 			t.Errorf("%s: insecure production config accepted", name)
 		}
+	}
+}
+
+func TestLimiterFailsClosedOnZeroLimit(t *testing.T) {
+	l := NewLimiter()
+	if ok, retry := l.Allow(Rule{"x", "k", 0, time.Minute}); ok || retry <= 0 {
+		t.Fatalf("zero limit must deny, got ok=%v retry=%v", ok, retry)
 	}
 }

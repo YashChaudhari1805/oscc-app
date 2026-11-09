@@ -30,13 +30,14 @@ type Server struct {
 	audit  *Audit
 	infer  *InferenceClient
 	sem    chan struct{}
+	xsem   chan struct{} // explanations are heavy: separate, much smaller pool
 	log    *slog.Logger
 }
 
 func NewServer(cfg *Config, mailer Mailer, audit *Audit, log *slog.Logger) *Server {
 	return &Server{cfg: cfg, auth: NewAuth(cfg), lim: NewLimiter(), mailer: mailer, audit: audit,
 		infer: NewInferenceClient(cfg.InferenceURL, cfg.InternalToken),
-		sem:   make(chan struct{}, cfg.MaxConcurrentInfer), log: log}
+		sem:   make(chan struct{}, max(1, cfg.MaxConcurrentInfer)), xsem: make(chan struct{}, max(1, cfg.MaxConcurrentExplain)), log: log}
 }
 
 func (s *Server) Sweep() { s.auth.Sweep(); s.lim.Sweep() }
@@ -128,6 +129,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auth/logout", s.authed(s.handleLogout))
 	mux.HandleFunc("GET /api/me", s.authed(s.handleMe))
 	mux.HandleFunc("POST /api/predict", s.authed(s.handlePredict))
+	mux.HandleFunc("POST /api/explain", s.authed(s.handleExplain))
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { writeErr(w, 404, "not_found", "Not found.") })
 	mux.Handle("/", s.static())
 	return s.recoverMW(s.logMW(s.securityMW(s.apiGuardMW(mux))))
@@ -331,65 +333,8 @@ func (s *Server) handlePredict(w http.ResponseWriter, r *http.Request, sess *Ses
 		writeRate(w, retry)
 		return
 	}
-	if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data") {
-		writeErr(w, 415, "unsupported_media_type", "Expected multipart/form-data.")
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadBytes+(1<<20))
-	mr, err := r.MultipartReader()
-	if err != nil {
-		writeErr(w, 400, "bad_request", "Malformed upload.")
-		return
-	}
-	var mag string
-	var img []byte
-	for parts := 0; ; parts++ {
-		if parts > 4 {
-			writeErr(w, 400, "bad_request", "Malformed upload.")
-			return
-		}
-		part, err := mr.NextPart()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			s.uploadErr(w, err)
-			return
-		}
-		switch part.FormName() {
-		case "magnification":
-			b, _ := io.ReadAll(io.LimitReader(part, 16))
-			mag = strings.TrimSpace(string(b))
-		case "image":
-			img, err = io.ReadAll(io.LimitReader(part, s.cfg.MaxUploadBytes+1))
-			if err != nil {
-				s.uploadErr(w, err)
-				return
-			}
-			if int64(len(img)) > s.cfg.MaxUploadBytes {
-				writeErr(w, 413, "too_large", "File is too large (limit "+strconv.FormatInt(s.cfg.MaxUploadBytes>>20, 10)+" MB).")
-				return
-			}
-		default:
-			_, _ = io.Copy(io.Discard, io.LimitReader(part, 1024))
-		}
-	}
-	if mag != "100x" && mag != "400x" {
-		writeErr(w, 400, "bad_magnification", "Choose 100x or 400x.")
-		return
-	}
-	if len(img) == 0 {
-		writeErr(w, 400, "no_image", "Attach an image.")
-		return
-	}
-	clean, _, _, _, err := sanitizeImage(img)
-	if err != nil {
-		st := 422
-		if errors.Is(err, errUnsupported) {
-			st = 415
-		}
-		s.audit.Log("predict_rejected", uid, s.ipTag(ip), map[string]any{"reason": err.Error()})
-		writeErr(w, st, err.Error(), rejectMessages[err.Error()])
+	mag, clean, ok := s.readImage(w, r, uid, ip, "predict")
+	if !ok {
 		return
 	}
 	select { // bounded concurrency toward the model
@@ -443,6 +388,136 @@ func (s *Server) handlePredict(w http.ResponseWriter, r *http.Request, sess *Ses
 		"tissueFraction": res.TissueFraction, "qc": qc, "model": res.Model,
 		"createdAt": time.Now().UTC().Format(time.RFC3339),
 		"notice":    "Research prototype. Not a medical device. Not validated for clinical use.",
+	})
+}
+
+// readImage parses the multipart upload, validates it and strips metadata. On failure it has already written the
+// HTTP error and returns ok=false. Shared by /api/predict and /api/explain so validation cannot drift apart.
+func (s *Server) readImage(w http.ResponseWriter, r *http.Request, uid, ip, event string) (mag string, clean []byte, ok bool) {
+	if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data") {
+		writeErr(w, 415, "unsupported_media_type", "Expected multipart/form-data.")
+		return "", nil, false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadBytes+(1<<20))
+	mr, err := r.MultipartReader()
+	if err != nil {
+		writeErr(w, 400, "bad_request", "Malformed upload.")
+		return "", nil, false
+	}
+	var img []byte
+	for parts := 0; ; parts++ {
+		if parts > 4 {
+			writeErr(w, 400, "bad_request", "Malformed upload.")
+			return "", nil, false
+		}
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			s.uploadErr(w, err)
+			return "", nil, false
+		}
+		switch part.FormName() {
+		case "magnification":
+			b, _ := io.ReadAll(io.LimitReader(part, 16))
+			mag = strings.TrimSpace(string(b))
+		case "image":
+			img, err = io.ReadAll(io.LimitReader(part, s.cfg.MaxUploadBytes+1))
+			if err != nil {
+				s.uploadErr(w, err)
+				return "", nil, false
+			}
+			if int64(len(img)) > s.cfg.MaxUploadBytes {
+				writeErr(w, 413, "too_large", "File is too large (limit "+strconv.FormatInt(s.cfg.MaxUploadBytes>>20, 10)+" MB).")
+				return "", nil, false
+			}
+		default:
+			_, _ = io.Copy(io.Discard, io.LimitReader(part, 1024))
+		}
+	}
+	if mag != "100x" && mag != "400x" {
+		writeErr(w, 400, "bad_magnification", "Choose 100x or 400x.")
+		return "", nil, false
+	}
+	if len(img) == 0 {
+		writeErr(w, 400, "no_image", "Attach an image.")
+		return "", nil, false
+	}
+	clean, _, _, _, err = sanitizeImage(img)
+	if err != nil {
+		st := 422
+		if errors.Is(err, errUnsupported) {
+			st = 415
+		}
+		s.audit.Log(event+"_rejected", uid, s.ipTag(ip), map[string]any{"reason": err.Error()})
+		writeErr(w, st, err.Error(), rejectMessages[err.Error()])
+		return "", nil, false
+	}
+	return mag, clean, true
+}
+
+// explainWait is how long a request waits for the single explanation slot (a var so tests can shorten it).
+var explainWait = 3 * time.Second
+
+// handleExplain returns an occlusion-sensitivity map for one image. It repeats the full validation and sanitising
+// of /api/predict, but has its own rate limits and concurrency gate because each call costs ~30 model passes.
+func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, sess *Session, _ string, ip string) {
+	uid, L := s.auth.UserID(sess.Email), s.cfg.Limits
+	if ok, retry := s.lim.Allow(
+		Rule{"exp-min", uid, L.ExplainPerMin, time.Minute},
+		Rule{"exp-hour", uid, L.ExplainPerHour, time.Hour},
+		Rule{"exp-day", uid, L.ExplainPerDay, 24 * time.Hour},
+		Rule{"exp-ip", ip, L.ExplainPerMinIP, time.Minute}); !ok {
+		s.audit.Log("explain_limited", uid, s.ipTag(ip), nil)
+		writeRate(w, retry)
+		return
+	}
+	mag, clean, ok := s.readImage(w, r, uid, ip, "explain")
+	if !ok {
+		return
+	}
+	select {
+	case s.xsem <- struct{}{}:
+		defer func() { <-s.xsem }()
+	case <-time.After(explainWait):
+		w.Header().Set("Retry-After", "10")
+		writeErr(w, 503, "busy", "Another explanation is being computed. Please try again in a few seconds.")
+		return
+	case <-r.Context().Done():
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	res, reason, err := s.infer.Explain(ctx, mag, clean)
+	if err != nil {
+		switch {
+		case errors.Is(err, errInferBadImage):
+			msg, ok := rejectMessages[reason]
+			if !ok {
+				reason, msg = "undecodable_image", rejectMessages["undecodable_image"]
+			}
+			writeErr(w, 422, reason, msg)
+		case errors.Is(err, errInferBusy):
+			w.Header().Set("Retry-After", "10")
+			writeErr(w, 503, "busy", "The analysis service is busy. Please try again in a few seconds.")
+		default:
+			s.log.Error("explain failed", "err", err)
+			s.audit.Log("explain_error", uid, s.ipTag(ip), nil)
+			writeErr(w, 503, "analysis_unavailable", "The analysis service is unavailable. Please try again later.")
+		}
+		return
+	}
+	c := res.Check
+	s.audit.Log("explain", uid, s.ipTag(ip), map[string]any{"mag": mag, "supported": c.Supported, "ms": res.LatencyMS})
+	writeJSON(w, 200, map[string]any{
+		"magnification": mag, "pOscc": res.POscc, "method": res.Method, "passes": res.Passes,
+		"grid": res.Grid, "windowCells": res.Window, "relative": res.Relative, "maxRel": res.MaxRel, "maxAbs": res.MaxAbs,
+		"check": map[string]any{
+			"cellsHidden": c.CellsHidden, "direction": c.Direction, "pBefore": c.PBefore, "pTopHidden": c.PTopHidden,
+			"pRandomHidden": c.PRandomHidden, "deltaTop": c.DeltaTop, "deltaRandom": c.DeltaRandom, "supported": c.Supported,
+		},
+		"model": res.Model, "createdAt": time.Now().UTC().Format(time.RFC3339),
 	})
 }
 

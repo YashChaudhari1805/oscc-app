@@ -51,6 +51,7 @@ const ICONS = {
   warn: "M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z",
   print: "M19 8H5a3 3 0 0 0-3 3v6h4v4h12v-4h4v-6a3 3 0 0 0-3-3zm-3 11H8v-5h8v5zm3-7a1 1 0 1 1 0-2 1 1 0 0 1 0 2zM18 3H6v4h12V3z",
   close: "M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z",
+  eye: "M12 5C7 5 2.7 8.1 1 12c1.7 3.9 6 7 11 7s9.3-3.1 11-7c-1.7-3.9-6-7-11-7zm0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8zm0-6.2a2.2 2.2 0 1 0 0 4.4 2.2 2.2 0 0 0 0-4.4z",
   check: "M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z",
   sun: "M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10zM11 1h2v3h-2V1zm0 19h2v3h-2v-3zM1 11h3v2H1v-2zm19 0h3v2h-3v-2zM4.2 5.6l1.4-1.4 2.1 2.1-1.4 1.4-2.1-2.1zm12.1 12.1 1.4-1.4 2.1 2.1-1.4 1.4-2.1-2.1zM5.6 19.8l-1.4-1.4 2.1-2.1 1.4 1.4-2.1 2.1zM18.4 4.2l1.4 1.4-2.1 2.1-1.4-1.4 2.1-2.1z",
   moon: "M12.1 22A10 10 0 0 1 9.6 2.3a.8.8 0 0 1 .9 1.1A8 8 0 0 0 20.6 13.5a.8.8 0 0 1 1.1.9A10 10 0 0 1 12.1 22z",
@@ -300,7 +301,138 @@ function Dropzone({ onFile, disabled }) {
   );
 }
 
-function ResultPanel({ r, email, onReset }) {
+/* ---------- explanation (occlusion map) ---------- */
+
+const fmtP = (p) => (p > 0.99 ? `${(p * 100).toFixed(1)}%` : p < 0.01 ? `${(p * 100).toFixed(1)}%` : `${Math.round(p * 100)}%`);
+const REGION = [["upper left", "top", "upper right"], ["left", "centre", "right"], ["lower left", "bottom", "lower right"]];
+
+/* Plain-language version of the map (also what a screen reader gets). */
+function describeRegions(ex) {
+  const [rows, cols] = ex.grid;
+  const sum = Array.from({ length: 3 }, () => Array(3).fill(0)), n = Array.from({ length: 3 }, () => Array(3).fill(0));
+  ex.relative.forEach((row, r) => row.forEach((v, c) => {
+    const br = Math.min(2, Math.floor((r * 3) / rows)), bc = Math.min(2, Math.floor((c * 3) / cols));
+    sum[br][bc] += v; n[br][bc] += 1;
+  }));
+  const blocks = [];
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) blocks.push({ name: REGION[i][j], v: sum[i][j] / Math.max(1, n[i][j]) });
+  const cut = 0.3 * Math.max(ex.maxRel, 0.5);
+  const up = blocks.filter((b) => b.v > cut).sort((a, b) => b.v - a.v).slice(0, 2).map((b) => b.name);
+  const down = blocks.filter((b) => b.v < -cut).sort((a, b) => a.v - b.v).slice(0, 2).map((b) => b.name);
+  return { up, down };
+}
+
+function HeatFigure({ src, w, h, ex, showOverlay = true, label }) {
+  const confirmed = ex.check.supported;
+  const [rows, cols] = ex.grid;
+  const scale = Math.max(ex.maxRel, 0.5);          // floor so tiny differences are not blown up into fake structure
+  const cells = [];
+  ex.relative.forEach((row, r) => row.forEach((v, c) => {
+    const a = Math.min(1, Math.abs(v) / scale);
+    if (a >= 0.12) cells.push(<rect key={`${r}-${c}`} x={c} y={r} width={1} height={1} className={v > 0 ? "hx-pos" : "hx-neg"} fillOpacity={(0.12 + 0.5 * a).toFixed(2)} />);
+  }));
+  return (
+    <div className={confirmed ? "hx" : "hx muted"} style={{ "--ar": w / h }} role="img" aria-label={label}>
+      <img src={src} alt="" />
+      {showOverlay && !confirmed && <span className="hx-badge">Not confirmed</span>}
+      {showOverlay && <svg viewBox={`0 0 ${cols} ${rows}`} preserveAspectRatio="none" focusable="false" aria-hidden="true">{cells}</svg>}
+    </div>
+  );
+}
+
+function ExplainSection({ r, ex, setEx, csrf, file, onExpired }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [show, setShow] = useState(true);
+  const [wait, setWait] = useCountdown(0);
+  const img = r.imageInfo;
+
+  const run = async () => {
+    if (busy || wait > 0 || !file) return;
+    setBusy(true);
+    setError("");
+    try {
+      setEx(await api.explain(csrf, r.magnification, file));
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return onExpired();
+      if (err instanceof ApiError && (err.status === 429 || err.code === "busy")) setWait(err.retryAfter || 15);
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const view = ex && img && r.previewUrl ? describeRegions(ex) : null;
+  const c = ex?.check;
+  const toward = c?.direction === "oscc" ? "lowered" : "raised";
+  const joinList = (a) => a.join(" and ");
+
+  return (
+    <section className="xai no-print" aria-labelledby="xai-title">
+      <h3 id="xai-title">Why this score?</h3>
+      {!ex && (
+        <>
+          <p className="soft small">
+            Hides small parts of the image one at a time and measures how the score changes. It shows what the model reacts to.
+            It does not show what is cancer.
+          </p>
+          {busy && <div className="progress" role="progressbar" aria-label="Computing explanation"><div /></div>}
+          {busy && <p className="soft small" role="status">Hiding parts of the image and re-scoring it. This takes about 5 to 15 seconds.</p>}
+          <p className="field-error" role="alert">{error}</p>
+          <button className="btn outline" onClick={run} disabled={busy || wait > 0 || !file}>
+            <Icon d={ICONS.eye} size={18} />{busy ? "Explaining…" : wait > 0 ? `Please wait ${wait}s` : "Explain this result"}
+          </button>
+        </>
+      )}
+      {ex && view && (
+        <>
+          <HeatFigure src={r.previewUrl} w={img.w} h={img.h} ex={ex} showOverlay={show}
+            label={`Occlusion map. ${view.up.length ? `Hiding the ${joinList(view.up)} lowers the OSCC score most.` : "No region stands out."}`} />
+          <div className="hx-bar">
+            <ul className="hx-legend" aria-label="Colour key">
+              <li><i className="sw pos" />Hiding it lowers the OSCC score</li>
+              <li><i className="sw neg" />Hiding it raises the score</li>
+            </ul>
+            <button className="btn quiet" aria-pressed={show} onClick={() => setShow(!show)}>{show ? "Hide overlay" : "Show overlay"}</button>
+          </div>
+          <p>
+            {view.up.length || view.down.length ? (
+              <>
+                {view.up.length > 0 && <>Hiding the <strong>{joinList(view.up)}</strong> of the image lowers the OSCC score the most. </>}
+                {view.down.length > 0 && <>Hiding the <strong>{joinList(view.down)}</strong> raises it.</>}
+              </>
+            ) : (
+              <>No part of the image stands out. The score depends on the whole field more than on any one region.</>
+            )}
+          </p>
+          {c.supported ? (
+            <p className="note ok"><Icon d={ICONS.check} size={18} />
+              <span><strong>Check passed.</strong> Hiding the {c.cellsHidden} most influential patches {toward} the score from {fmtP(c.pBefore)} to {fmtP(c.pTopHidden)},
+              but hiding {c.cellsHidden} random patches only changed it to {fmtP(c.pRandomHidden)}.</span></p>
+          ) : (
+            <p className="note warn"><Icon d={ICONS.warn} size={18} />
+              <span><strong>Map not confirmed.</strong> Hiding the highlighted patches changed the score about as much as hiding random ones
+              ({fmtP(c.pBefore)} to {fmtP(c.pTopHidden)} versus {fmtP(c.pRandomHidden)}). Do not rely on where the colours fall for this image.</span></p>
+          )}
+          <details className="how">
+            <summary>How to read this</summary>
+            <ul>
+              <li>Colours show how much more or less each part matters than a typical part. Blocks are coarse on purpose.</li>
+              <li>A coloured region means the model's score is sensitive to it. It does not mean the region is cancerous.</li>
+              <li>Overlapping patches and context mean the map can miss evidence that is spread out. A pathologist's own reading always comes first.</li>
+            </ul>
+          </details>
+          <button className="btn quiet" onClick={() => { setEx(null); setError(""); }}>Run again</button>
+        </>
+      )}
+    </section>
+  );
+}
+
+function ResultPanel({ r, email, csrf, file, onExpired, onReset }) {
+  const [ex, setEx] = useState(null);
+  let sec = 0;
+  const N = () => ++sec;          // report section numbers stay correct whether or not an explanation exists
   const L = LABELS[r.label];
   const d = new Date(r.createdAt);
   const when = d.toLocaleString();
@@ -324,6 +456,7 @@ function ResultPanel({ r, email, onReset }) {
         <div><dt>Model</dt><dd>{r.model?.version}</dd></div>
         <div><dt>Analysed</dt><dd>{when}</dd></div>
       </dl>
+      <ExplainSection r={r} ex={ex} setEx={setEx} csrf={csrf} file={file} onExpired={onExpired} />
       <p className="soft small">{r.notice}</p>
       <div className="row between no-print">
         <button className="btn quiet" onClick={() => window.print()}><Icon d={ICONS.print} size={18} />Print report</button>
@@ -347,7 +480,7 @@ function ResultPanel({ r, email, onReset }) {
         <p className="rp-banner">Research prototype. Not a diagnosis, not a medical device, and not validated for clinical use.</p>
 
         <section className="rp-sec">
-          <h2>1. Case details</h2>
+          <h2>{N()}. Case details</h2>
           <table className="rp-form"><tbody>
             <tr><th>Case / patient ID</th><td /><th>Specimen site</th><td /></tr>
             <tr><th>Requesting clinician</th><td /><th>Slide / block no.</th><td /></tr>
@@ -356,7 +489,7 @@ function ResultPanel({ r, email, onReset }) {
         </section>
 
         <section className="rp-sec">
-          <h2>2. Summary of result</h2>
+          <h2>{N()}. Summary of result</h2>
           <div className={`rp-verdict tone-box-${L.tone}`}>
             <strong>{L.title}</strong>
             <span>{L.hint}</span>
@@ -369,7 +502,7 @@ function ResultPanel({ r, email, onReset }) {
         </section>
 
         <section className="rp-sec rp-keep">
-          <h2>3. Analysed image</h2>
+          <h2>{N()}. Analysed image</h2>
           <div className="rp-image">
             {r.previewUrl && <img src={r.previewUrl} alt="Analysed field" />}
             <table className="rp-table"><tbody>
@@ -381,8 +514,24 @@ function ResultPanel({ r, email, onReset }) {
           </div>
         </section>
 
+        {ex && r.previewUrl && r.imageInfo && (
+          <section className="rp-sec rp-keep">
+            <h2>{N()}. Explanation of the score (occlusion map)</h2>
+            <div className="rp-image">
+              <HeatFigure src={r.previewUrl} w={r.imageInfo.w} h={r.imageInfo.h} ex={ex} label="Occlusion map of the analysed field" />
+              <table className="rp-table"><tbody>
+                <tr><th>Method</th><td>Parts of the image are hidden one at a time and the model is re-scored</td></tr>
+                <tr><th>Red</th><td>Hiding it lowers the OSCC score</td></tr>
+                <tr><th>Teal</th><td>Hiding it raises the score</td></tr>
+                <tr><th>Self-check</th><td>{ex.check.supported ? "Passed" : "Not confirmed"}: hiding the {ex.check.cellsHidden} top patches moved the score {fmtP(ex.check.pBefore)} to {fmtP(ex.check.pTopHidden)}; {ex.check.cellsHidden} random patches gave {fmtP(ex.check.pRandomHidden)}</td></tr>
+              </tbody></table>
+            </div>
+            <p className="rp-note">Shows what the model's score is sensitive to. It does not show what is cancer and is not an annotation by a pathologist.</p>
+          </section>
+        )}
+
         <section className="rp-sec rp-keep">
-          <h2>4. Image quality checks</h2>
+          <h2>{N()}. Image quality checks</h2>
           {r.qc.length ? (
             <ul className="rp-list">{r.qc.map((q) => <li key={q.code}>{q.message}</li>)}</ul>
           ) : (
@@ -391,7 +540,7 @@ function ResultPanel({ r, email, onReset }) {
         </section>
 
         <section className="rp-sec rp-keep">
-          <h2>5. Method</h2>
+          <h2>{N()}. Method</h2>
           <table className="rp-table"><tbody>
             <tr><th>Task</th><td>Binary classification: normal epithelium vs oral squamous cell carcinoma (OSCC)</td></tr>
             <tr><th>Model</th><td>{r.model?.version ?? "n/a"} ({r.magnification} model)</td></tr>
@@ -402,7 +551,7 @@ function ResultPanel({ r, email, onReset }) {
         </section>
 
         <section className="rp-sec rp-keep">
-          <h2>6. Limitations</h2>
+          <h2>{N()}. Limitations</h2>
           <ul className="rp-list">
             <li>The model has not been tested on images from other laboratories, stains or scanners.</li>
             <li>It looks at a single microscope field. It does not assess the whole slide and does not grade tumours.</li>
@@ -412,7 +561,7 @@ function ResultPanel({ r, email, onReset }) {
         </section>
 
         <section className="rp-sec rp-keep rp-sign">
-          <h2>7. Review</h2>
+          <h2>{N()}. Review</h2>
           <div className="rp-sign-grid">
             <div><span>Reviewer name</span></div>
             <div><span>Signature</span></div>
@@ -518,7 +667,7 @@ function Workspace({ csrf, email, onExpired }) {
         </section>
 
         {result ? (
-          <ResultPanel r={result} email={email} onReset={clear} />
+          <ResultPanel key={result.resultId} r={result} email={email} csrf={csrf} file={file} onExpired={onExpired} onReset={clear} />
         ) : (
           <section className="panel empty no-print" aria-label="Result">
             <h2>Your result appears here</h2>

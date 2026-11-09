@@ -57,7 +57,12 @@ func (l *Limiter) Allow(rules ...Rule) (bool, time.Duration) {
 			i++
 		}
 		b.ts = b.ts[i:]
-		if len(b.ts) >= r.Limit {
+		if r.Limit <= 0 { // misconfigured rule: fail closed instead of indexing out of range
+			denied = true
+			if r.Window > retry {
+				retry = r.Window
+			}
+		} else if len(b.ts) >= r.Limit {
 			denied = true
 			if d := b.ts[len(b.ts)-r.Limit].Add(r.Window).Sub(now); d > retry {
 				retry = d

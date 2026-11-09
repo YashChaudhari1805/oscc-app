@@ -14,6 +14,27 @@ Light by default (dark mode via the toggle; the choice is remembered and the OS 
 Hanken Grotesk (light, tight tracking) with Instrument Serif italic for the accent, both bundled locally. The
 ribbed arc is a microscope graticule and doubles as the score dial. No external fonts, scripts or images.
 
+## Explainability ("Why this score?")
+
+After a result, **Explain this result** draws an *occlusion-sensitivity* map over the image: small patches are hidden one at a
+time (painted with the image's own blank-glass colour), the model re-scores the image, and each patch is coloured by how much
+the OSCC log-odds moved relative to a typical patch. Rose = hiding it lowers the OSCC score; teal = hiding it raises it.
+
+* **Why not Grad-CAM:** in this project's own masking test, Grad-CAM-ranked regions were no more important than random ones.
+  Occlusion is a direct measurement of the real model's behaviour, and it works on the ONNX file (no TensorFlow at serving time).
+* **Self-check on every map:** the top-ranked patches are hidden together and compared with the same number of random
+  patches. If the "important" patches do not move the score clearly more than random ones, the UI shows **Map not confirmed**,
+  mutes the overlay and badges the image. Failing the check is informative, not an error.
+* **Cost / limits:** about 30 model passes (about 4 s here; depends on CPU). `/api/explain` has its own tighter limits
+  (`LIMIT_EXPLAIN_PER_MIN=3`, `_PER_HOUR=20`, `_PER_DAY=60`, `_PER_MIN_IP=6`) and one concurrent explanation (`MAX_CONCURRENT_EXPLAIN`).
+  Tuning (inference service): `EXPLAIN_ROWS/COLS` (9x12), `EXPLAIN_WINDOW` (3), `EXPLAIN_STRIDE` (2), `EXPLAIN_RANDOM` (4).
+* **What it is not:** it shows what the score is sensitive to, not what is cancer. Patches overlap and the model can use
+  context, so it can miss spread-out evidence. It is included (with the self-check result) as its own section of the printable report.
+* **Tested:** `inference/tests/test_explain.py` checks the algorithm on models with known behaviour (a model that only uses
+  one quadrant must highlight that quadrant and pass the check; a model using the whole image equally must not pass; a constant model
+  must give a flat map), plus the API on the real models. `gateway/explain_test.go` covers auth, CSRF, separate limits, busy handling and rejection of malformed model output.
+  **Not yet validated on real histology images:** please run it on a set of real fields and record how often the self-check passes.
+
 ## Architecture
 
 ```

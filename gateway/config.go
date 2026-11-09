@@ -15,6 +15,8 @@ type Limits struct {
 	VerifyPerIP15m, VerifyPerEmail15m  int
 	PredictPerMin, PredictPerHour      int
 	PredictPerDay, PredictPerMinIP     int
+	ExplainPerMin, ExplainPerHour      int // an explanation costs ~30 model passes: own, tighter budget
+	ExplainPerDay, ExplainPerMinIP     int
 }
 
 type Config struct {
@@ -38,10 +40,11 @@ type Config struct {
 	WebDir    string
 	AuditPath string
 
-	MaxUploadBytes     int64
-	MaxConcurrentInfer int
-	LowBand, HighBand  float64
-	Limits             Limits
+	MaxUploadBytes       int64
+	MaxConcurrentInfer   int
+	MaxConcurrentExplain int
+	LowBand, HighBand    float64
+	Limits               Limits
 }
 
 func envStr(k, d string) string {
@@ -88,33 +91,36 @@ func splitSet(s string) map[string]bool {
 func LoadConfig() (*Config, error) {
 	prod := envStr("APP_ENV", "development") == "production"
 	c := &Config{
-		Env:                envStr("APP_ENV", "development"),
-		Addr:               envStr("GATEWAY_ADDR", "127.0.0.1:8080"),
-		InferenceURL:       strings.TrimRight(envStr("INFERENCE_URL", "http://127.0.0.1:9000"), "/"),
-		InternalToken:      os.Getenv("INTERNAL_TOKEN"),
-		AllowedEmails:      splitSet(os.Getenv("ALLOWED_EMAILS")),
-		AllowedDomains:     splitSet(os.Getenv("ALLOWED_DOMAINS")),
-		AllowAnyEmail:      envBool("ALLOW_ANY_EMAIL", false),
-		CookieSecure:       envBool("COOKIE_SECURE", prod),
-		TrustedProxy:       envBool("TRUSTED_PROXY", false),
-		SMTPHost:           os.Getenv("SMTP_HOST"),
-		SMTPPort:           envStr("SMTP_PORT", "587"),
-		SMTPUser:           os.Getenv("SMTP_USER"),
-		SMTPPass:           os.Getenv("SMTP_PASS"),
-		SMTPFrom:           os.Getenv("SMTP_FROM"),
-		DevEchoOTP:         envBool("DEV_ECHO_OTP", false),
-		WebDir:             envStr("WEB_DIR", "../web/dist"),
-		AuditPath:          envStr("AUDIT_LOG", "audit.jsonl"),
-		MaxUploadBytes:     int64(envInt("MAX_UPLOAD_MB", 20)) << 20,
-		MaxConcurrentInfer: envInt("MAX_CONCURRENT_INFER", 4),
-		LowBand:            envFloat("BAND_LOW", 0.20),
-		HighBand:           envFloat("BAND_HIGH", 0.80),
+		Env:                  envStr("APP_ENV", "development"),
+		Addr:                 envStr("GATEWAY_ADDR", "127.0.0.1:8080"),
+		InferenceURL:         strings.TrimRight(envStr("INFERENCE_URL", "http://127.0.0.1:9000"), "/"),
+		InternalToken:        os.Getenv("INTERNAL_TOKEN"),
+		AllowedEmails:        splitSet(os.Getenv("ALLOWED_EMAILS")),
+		AllowedDomains:       splitSet(os.Getenv("ALLOWED_DOMAINS")),
+		AllowAnyEmail:        envBool("ALLOW_ANY_EMAIL", false),
+		CookieSecure:         envBool("COOKIE_SECURE", prod),
+		TrustedProxy:         envBool("TRUSTED_PROXY", false),
+		SMTPHost:             os.Getenv("SMTP_HOST"),
+		SMTPPort:             envStr("SMTP_PORT", "587"),
+		SMTPUser:             os.Getenv("SMTP_USER"),
+		SMTPPass:             os.Getenv("SMTP_PASS"),
+		SMTPFrom:             os.Getenv("SMTP_FROM"),
+		DevEchoOTP:           envBool("DEV_ECHO_OTP", false),
+		WebDir:               envStr("WEB_DIR", "../web/dist"),
+		AuditPath:            envStr("AUDIT_LOG", "audit.jsonl"),
+		MaxUploadBytes:       int64(envInt("MAX_UPLOAD_MB", 20)) << 20,
+		MaxConcurrentInfer:   envInt("MAX_CONCURRENT_INFER", 4),
+		MaxConcurrentExplain: envInt("MAX_CONCURRENT_EXPLAIN", 1),
+		LowBand:              envFloat("BAND_LOW", 0.20),
+		HighBand:             envFloat("BAND_HIGH", 0.80),
 		Limits: Limits{
 			GlobalPerMinIP:  envInt("LIMIT_GLOBAL_PER_MIN_IP", 120),
 			OTPReqPerIPHour: envInt("LIMIT_OTP_REQ_PER_IP_HOUR", 10), OTPReqPerEmail15m: envInt("LIMIT_OTP_REQ_PER_EMAIL_15M", 3),
 			VerifyPerIP15m: envInt("LIMIT_VERIFY_PER_IP_15M", 20), VerifyPerEmail15m: envInt("LIMIT_VERIFY_PER_EMAIL_15M", 10),
 			PredictPerMin: envInt("LIMIT_PREDICT_PER_MIN", 5), PredictPerHour: envInt("LIMIT_PREDICT_PER_HOUR", 40),
 			PredictPerDay: envInt("LIMIT_PREDICT_PER_DAY", 150), PredictPerMinIP: envInt("LIMIT_PREDICT_PER_MIN_IP", 15),
+			ExplainPerMin: envInt("LIMIT_EXPLAIN_PER_MIN", 3), ExplainPerHour: envInt("LIMIT_EXPLAIN_PER_HOUR", 20),
+			ExplainPerDay: envInt("LIMIT_EXPLAIN_PER_DAY", 60), ExplainPerMinIP: envInt("LIMIT_EXPLAIN_PER_MIN_IP", 6),
 		},
 	}
 	c.CookieName = "oscc_session"
