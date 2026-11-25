@@ -15,6 +15,8 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from explain import explain_occlusion
+from xai.adapter import OnnxAdapter
+from xai.serve import explain_for_ui
 from preprocess import InvalidImage, decode_image, preprocess_image, tissue_mask
 
 log = logging.getLogger("inference")
@@ -33,6 +35,8 @@ EXPLAIN_COLS = int(os.environ.get("EXPLAIN_COLS", 12))
 EXPLAIN_WINDOW = int(os.environ.get("EXPLAIN_WINDOW", 3))
 EXPLAIN_STRIDE = int(os.environ.get("EXPLAIN_STRIDE", 2))
 EXPLAIN_RANDOM = int(os.environ.get("EXPLAIN_RANDOM", 4))
+EXPLAIN_CAM_RANDOM = int(os.environ.get("EXPLAIN_CAM_RANDOM", 6))   # random-hide draws per imputer in the CAM self-check
+EXPLAIN_METHOD = os.environ.get("EXPLAIN_METHOD", "auto")            # auto | cam | occlusion
 EXPLAIN_SLOTS = threading.Semaphore(int(os.environ.get("EXPLAIN_MAX_CONCURRENCY", 1)))  # explanations are ~75 forward passes each
 MAGS = ("100x", "400x")
 
@@ -59,6 +63,16 @@ class Model:
             import keras
             self.km = keras.saving.load_model(keras_path, compile=False)
             self.backend, self.file = "keras", keras_path
+        # exact-decomposition adapter (adds the logit + last feature map as outputs and VERIFIES logit = b + mean_ij w.F_ij);
+        # if the head is not decomposable or the `onnx` package is missing we log why and fall back to occlusion
+        self.adapter = None
+        if self.backend == "onnx":
+            try:
+                self.adapter = OnnxAdapter(onnx_path, self.img_hw)
+                if not self.adapter.has_cam:
+                    log.warning("%s: exact explanations unavailable (%s); using occlusion", mag, self.adapter.cam_error)
+            except Exception as e:
+                log.warning("%s: XAI adapter failed (%s); using occlusion", mag, e)
         h = hashlib.sha256(self.file.read_bytes()).hexdigest()[:12]
         self.version = f"{mag}-{h}"
         self.lock = threading.Semaphore(MAX_CONCURRENCY)
@@ -140,32 +154,43 @@ def _run(model: Model, data: bytes):
 
 
 @app.post("/v1/explain")
-async def explain(request: Request, mag: str = Query(...)):
+async def explain(request: Request, mag: str = Query(...), method: str = Query(EXPLAIN_METHOD)):
     _auth(request)
     if mag not in MODELS:
         raise HTTPException(status_code=400, detail="magnification_unavailable")
+    if method not in ("auto", "cam", "occlusion"):
+        raise HTTPException(status_code=400, detail="unknown_method")
+    if method == "cam" and not (MODELS[mag].adapter and MODELS[mag].adapter.has_cam):
+        raise HTTPException(status_code=501, detail="cam_unavailable")
     data = await request.body()
     if not data or len(data) > MAX_BYTES:
         raise HTTPException(status_code=413 if data else 400, detail="too_large" if data else "empty")
     if not EXPLAIN_SLOTS.acquire(blocking=False):  # never queue heavy work behind heavy work
         raise HTTPException(status_code=503, detail="busy")
     try:
-        return _explain(MODELS[mag], data)
+        return _explain(MODELS[mag], data, method)
     finally:
         EXPLAIN_SLOTS.release()
 
 
-def _explain(model: Model, data: bytes):
+def _explain(model: Model, data: bytes, method: str = "auto"):
     t0 = time.perf_counter()
     try:
         arr, (ow, oh) = decode_image(data, model.img_hw, MAX_PIXELS)
     except InvalidImage as e:
         return JSONResponse(status_code=422, content={"error": str(e)})
     img, tissue = preprocess_image(arr, model.img_hw)
+    seed = zlib.crc32(data) & 0x7FFFFFFF
+    if method != "occlusion" and model.adapter is not None and model.adapter.has_cam:
+        res = explain_for_ui(model.adapter, img, n_random=EXPLAIN_CAM_RANDOM, seed=seed)
+        res.update({"mag": model.mag, "tissue_fraction": round(tissue, 4),
+                    "model": {"version": model.version, "backend": model.backend},
+                    "latency_ms": int((time.perf_counter() - t0) * 1000)})
+        return res
     glass = img[~tissue_mask(img)]  # hide patches with this image's own blank-glass colour
     fill = np.median(glass, axis=0) if len(glass) > 200 else (240, 240, 240)
     res = explain_occlusion(model.predict_batch, img, rows=EXPLAIN_ROWS, cols=EXPLAIN_COLS, win=EXPLAIN_WINDOW, stride=EXPLAIN_STRIDE,
-                            fill=fill, n_random=EXPLAIN_RANDOM, seed=zlib.crc32(data) & 0x7FFFFFFF)
+                            fill=fill, n_random=EXPLAIN_RANDOM, seed=seed)
     res.update({"mag": model.mag, "tissue_fraction": round(tissue, 4), "model": {"version": model.version, "backend": model.backend},
                 "latency_ms": int((time.perf_counter() - t0) * 1000)})
     return res

@@ -1488,7 +1488,7 @@ input {
 }
 
 .hx.muted svg {
-  opacity: .5;
+  opacity: .9;   /* still clearly visible; the badge, not a faded map, carries the warning */
 }
 
 /* a map that failed its own check must not look authoritative */

@@ -138,3 +138,28 @@ inference/  preprocess.py (training-parity), server.py, tests/        gateway/  
 web/        React app                                                scripts/  keras_to_onnx.py, make_dummy_models.py, run_dev.sh
 deploy/     Dockerfiles, compose, Caddyfile                          models/   put exports here (not shipped)
 ```
+
+## Explainability (XAI)
+
+The service explains a score with an **exact decomposition** of the model's logit, not with occlusion.
+The head is `GAP -> Dense(1) -> sigmoid`, so `logit = b + mean_ij w.F_ij` over the last feature map. `inference/xai/` exposes
+that map from the exported ONNX (no TensorFlow), **verifies the identity numerically at load**, and refuses to show an
+"exact" map if it fails. The UI self-check hides the top regions under two different imputers (ROAD and blur) and must pass under both.
+`EXPLAIN_METHOD=occlusion` restores the legacy method.
+
+What the decomposition does and does not claim: it is exact about the *decision* (contributions sum to the logit); it is only
+approximate about *where in the pixels*, because each 32 px cell has a large receptive field. Localisation is therefore measured, not assumed.
+
+Offline evaluation protocol (`research/xai_eval/run_eval.py`):
+
+| Requirement | What is computed |
+|---|---|
+| Faithful | exact completeness error; MoRF/LeRF/random removal in logit units under 4 imputers, against model-free controls; cascading model-randomisation sanity check |
+| Stable | noise, JPEG, brightness, stain jitter, defocus, shift; flip/rot180 equivariance; seed stability; conditioned on a stable prediction; chance level from other images |
+| Not a masking artefact | every faithfulness claim must hold under constant, blur, shuffle and ROAD imputation; imputer "shock" index; controls tuned to exploit masking |
+| Matches experts | AUROC / rank accuracy / mass accuracy vs masks with chance and control baselines; model-grounded ablation of the marked region; inter-rater ceiling; patient-clustered bootstrap, Holm-corrected |
+
+`python research/xai_eval/run_eval.py --smoke` checks the pipeline on synthetic images (numbers are meaningless).
+Real evaluation needs a manifest (`path,patient,label[,mask,mask2]`) of **held-out test patients**. Expected Gradients
+(`--methods eg`) needs TensorFlow and normal-class training images (`--bank-dir`); on this network its completeness gap must be
+reported per image (`converged` flag), because the logit changes sharply near the baseline.

@@ -5,5 +5,13 @@ opencv-python-headless
 pillow
 scikit-image>=0.22,<2
 onnxruntime>=1.17
+onnx>=1.15            # lets the service expose the logit + feature map for exact explanations (falls back to occlusion without it)
+scipy
 # Only needed when serving the .keras file instead of ONNX (BACKEND=keras):
 # tensorflow-cpu>=2.16
+
+# research/xai_eval only (not needed to serve):
+# pandas
+# scikit-learn
+# matplotlib
+# tensorflow-cpu>=2.16   (Expected Gradients + randomisation sanity checks need real gradients/weights)

@@ -306,6 +306,11 @@ function Dropzone({ onFile, disabled }) {
 const fmtP = (p) => (p > 0.99 ? `${(p * 100).toFixed(1)}%` : p < 0.01 ? `${(p * 100).toFixed(1)}%` : `${Math.round(p * 100)}%`);
 const REGION = [["upper left", "top", "upper right"], ["left", "centre", "right"], ["lower left", "bottom", "lower right"]];
 
+/* Smallest map amplitude (in logit units) treated as real structure. Occlusion values are whole-window score drops, so 0.5 is a
+   sensible floor. The exact decomposition spreads the whole logit over every cell (a typical cell carries ~logit/100), so a 0.5
+   floor would render it invisible; it is exact, not noisy, so a small floor is correct. */
+const mapFloor = (ex) => (ex.method === "cam_exact" ? 0.005 : 0.5);
+
 /* Plain-language version of the map (also what a screen reader gets). */
 function describeRegions(ex) {
   const [rows, cols] = ex.grid;
@@ -316,7 +321,7 @@ function describeRegions(ex) {
   }));
   const blocks = [];
   for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) blocks.push({ name: REGION[i][j], v: sum[i][j] / Math.max(1, n[i][j]) });
-  const cut = 0.3 * Math.max(ex.maxRel, 0.5);
+  const cut = 0.3 * Math.max(ex.maxRel, mapFloor(ex));
   const up = blocks.filter((b) => b.v > cut).sort((a, b) => b.v - a.v).slice(0, 2).map((b) => b.name);
   const down = blocks.filter((b) => b.v < -cut).sort((a, b) => a.v - b.v).slice(0, 2).map((b) => b.name);
   return { up, down };
@@ -324,12 +329,13 @@ function describeRegions(ex) {
 
 function HeatFigure({ src, w, h, ex, showOverlay = true, label }) {
   const confirmed = ex.check.supported;
+  const cam = ex.method === "cam_exact";
   const [rows, cols] = ex.grid;
-  const scale = Math.max(ex.maxRel, 0.5);          // floor so tiny differences are not blown up into fake structure
+  const scale = Math.max(ex.maxRel, mapFloor(ex));          // floor so tiny differences are not blown up into fake structure
   const cells = [];
   ex.relative.forEach((row, r) => row.forEach((v, c) => {
     const a = Math.min(1, Math.abs(v) / scale);
-    if (a >= 0.12) cells.push(<rect key={`${r}-${c}`} x={c} y={r} width={1} height={1} className={v > 0 ? "hx-pos" : "hx-neg"} fillOpacity={(0.12 + 0.5 * a).toFixed(2)} />);
+    if (a >= (cam ? 0.05 : 0.12)) cells.push(<rect key={`${r}-${c}`} x={c} y={r} width={1} height={1} className={v > 0 ? "hx-pos" : "hx-neg"} fillOpacity={(cam ? 0.22 + 0.58 * a : 0.12 + 0.5 * a).toFixed(2)} />);
   }));
   return (
     <div className={confirmed ? "hx" : "hx muted"} style={{ "--ar": w / h }} role="img" aria-label={label}>
@@ -364,6 +370,7 @@ function ExplainSection({ r, ex, setEx, csrf, file, onExpired }) {
 
   const view = ex && img && r.previewUrl ? describeRegions(ex) : null;
   const c = ex?.check;
+  const cam = ex?.method === "cam_exact";      // exact decomposition of the score vs. the older hide-and-rescore map
   const toward = c?.direction === "oscc" ? "lowered" : "raised";
   const joinList = (a) => a.join(" and ");
 
@@ -373,11 +380,11 @@ function ExplainSection({ r, ex, setEx, csrf, file, onExpired }) {
       {!ex && (
         <>
           <p className="soft small">
-            Hides small parts of the image one at a time and measures how the score changes. It shows what the model reacts to.
-            It does not show what is cancer.
+            Splits the score into how much each part of the image pushed it toward OSCC or toward normal, then checks that
+            against hiding parts of the image in two different ways. It shows what the model reacts to. It does not show what is cancer.
           </p>
           {busy && <div className="progress" role="progressbar" aria-label="Computing explanation"><div /></div>}
-          {busy && <p className="soft small" role="status">Hiding parts of the image and re-scoring it. This takes about 5 to 15 seconds.</p>}
+          {busy && <p className="soft small" role="status">Working out which parts of the image drove the score. This takes a few seconds.</p>}
           <p className="field-error" role="alert">{error}</p>
           <button className="btn outline" onClick={run} disabled={busy || wait > 0 || !file}>
             <Icon d={ICONS.eye} size={18} />{busy ? "Explaining…" : wait > 0 ? `Please wait ${wait}s` : "Explain this result"}
@@ -387,19 +394,23 @@ function ExplainSection({ r, ex, setEx, csrf, file, onExpired }) {
       {ex && view && (
         <>
           <HeatFigure src={r.previewUrl} w={img.w} h={img.h} ex={ex} showOverlay={show}
-            label={`Occlusion map. ${view.up.length ? `Hiding the ${joinList(view.up)} lowers the OSCC score most.` : "No region stands out."}`} />
+            label={`${cam ? "Contribution map" : "Occlusion map"}. ${view.up.length ? (cam ? `The ${joinList(view.up)} pushes the score toward OSCC most.` : `Hiding the ${joinList(view.up)} lowers the OSCC score most.`) : "No region stands out."}`} />
           <div className="hx-bar">
             <ul className="hx-legend" aria-label="Colour key">
-              <li><i className="sw pos" />Hiding it lowers the OSCC score</li>
-              <li><i className="sw neg" />Hiding it raises the score</li>
+              <li><i className="sw pos" />{cam ? "Pushes the score toward OSCC" : "Hiding it lowers the OSCC score"}</li>
+              <li><i className="sw neg" />{cam ? "Pushes the score toward normal" : "Hiding it raises the score"}</li>
             </ul>
             <button className="btn quiet" aria-pressed={show} onClick={() => setShow(!show)}>{show ? "Hide overlay" : "Show overlay"}</button>
           </div>
           <p>
             {view.up.length || view.down.length ? (
               <>
-                {view.up.length > 0 && <>Hiding the <strong>{joinList(view.up)}</strong> of the image lowers the OSCC score the most. </>}
-                {view.down.length > 0 && <>Hiding the <strong>{joinList(view.down)}</strong> raises it.</>}
+                {view.up.length > 0 && (cam
+                  ? <>The <strong>{joinList(view.up)}</strong> of the image pushes the score toward OSCC the most. </>
+                  : <>Hiding the <strong>{joinList(view.up)}</strong> of the image lowers the OSCC score the most. </>)}
+                {view.down.length > 0 && (cam
+                  ? <>The <strong>{joinList(view.down)}</strong> pushes it toward normal.</>
+                  : <>Hiding the <strong>{joinList(view.down)}</strong> raises it.</>)}
               </>
             ) : (
               <>No part of the image stands out. The score depends on the whole field more than on any one region.</>
@@ -417,9 +428,11 @@ function ExplainSection({ r, ex, setEx, csrf, file, onExpired }) {
           <details className="how">
             <summary>How to read this</summary>
             <ul>
-              <li>Colours show how much more or less each part matters than a typical part. Blocks are coarse on purpose.</li>
-              <li>A coloured region means the model's score is sensitive to it. It does not mean the region is cancerous.</li>
-              <li>Overlapping patches and context mean the map can miss evidence that is spread out. A pathologist's own reading always comes first.</li>
+              <li>Colours show how much more or less each part contributed than a typical part. Blocks are coarse on purpose.</li>
+              <li>A coloured region means the model's score depends on it. It does not mean the region is cancerous.</li>
+              {cam
+                ? <li>The contributions add up exactly to the model's score, but each block "sees" far more than its own square, so edges between blocks are approximate. A pathologist's own reading always comes first.</li>
+                : <li>Overlapping patches and context mean the map can miss evidence that is spread out. A pathologist's own reading always comes first.</li>}
             </ul>
           </details>
           <button className="btn quiet" onClick={() => { setEx(null); setError(""); }}>Run again</button>
@@ -431,6 +444,7 @@ function ExplainSection({ r, ex, setEx, csrf, file, onExpired }) {
 
 function ResultPanel({ r, email, csrf, file, onExpired, onReset }) {
   const [ex, setEx] = useState(null);
+  const cam = ex?.method === "cam_exact";      // exact decomposition vs. the older hide-and-rescore map
   let sec = 0;
   const N = () => ++sec;          // report section numbers stay correct whether or not an explanation exists
   const L = LABELS[r.label];
@@ -516,17 +530,17 @@ function ResultPanel({ r, email, csrf, file, onExpired, onReset }) {
 
         {ex && r.previewUrl && r.imageInfo && (
           <section className="rp-sec rp-keep">
-            <h2>{N()}. Explanation of the score (occlusion map)</h2>
+            <h2>{N()}. Explanation of the score ({cam ? "contribution map" : "occlusion map"})</h2>
             <div className="rp-image">
-              <HeatFigure src={r.previewUrl} w={r.imageInfo.w} h={r.imageInfo.h} ex={ex} label="Occlusion map of the analysed field" />
+              <HeatFigure src={r.previewUrl} w={r.imageInfo.w} h={r.imageInfo.h} ex={ex} label={cam ? "Contribution map of the analysed field" : "Occlusion map of the analysed field"} />
               <table className="rp-table"><tbody>
-                <tr><th>Method</th><td>Parts of the image are hidden one at a time and the model is re-scored</td></tr>
-                <tr><th>Red</th><td>Hiding it lowers the OSCC score</td></tr>
-                <tr><th>Teal</th><td>Hiding it raises the score</td></tr>
+                <tr><th>Method</th><td>{cam ? "The score is split exactly over the image (class-activation decomposition), then confirmed by hiding parts in two ways" : "Parts of the image are hidden one at a time and the model is re-scored"}</td></tr>
+                <tr><th>Red</th><td>{cam ? "Pushes the score toward OSCC" : "Hiding it lowers the OSCC score"}</td></tr>
+                <tr><th>Teal</th><td>{cam ? "Pushes the score toward normal" : "Hiding it raises the score"}</td></tr>
                 <tr><th>Self-check</th><td>{ex.check.supported ? "Passed" : "Not confirmed"}: hiding the {ex.check.cellsHidden} top patches moved the score {fmtP(ex.check.pBefore)} to {fmtP(ex.check.pTopHidden)}; {ex.check.cellsHidden} random patches gave {fmtP(ex.check.pRandomHidden)}</td></tr>
               </tbody></table>
             </div>
-            <p className="rp-note">Shows what the model's score is sensitive to. It does not show what is cancer and is not an annotation by a pathologist.</p>
+            <p className="rp-note">Shows what the model's score depends on. It does not show what is cancer and is not an annotation by a pathologist.</p>
           </section>
         )}
 
